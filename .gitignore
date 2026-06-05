@@ -44,11 +44,6 @@ yarn-error.log*
 /playwright/*
 test.env
 
-# documentation
-SETUP.md
-README.md
-LICENSE
-
 # Local agent tooling audit logs / stray outputs
 outputs/
 **/agent-audit.jsonl
