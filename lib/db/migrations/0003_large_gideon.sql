@@ -1,0 +1,1 @@
+ALTER TABLE "AgentTool" ADD COLUMN "showDetailsToUsers" boolean DEFAULT false NOT NULL;

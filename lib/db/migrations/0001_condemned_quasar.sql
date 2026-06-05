@@ -1,0 +1,1 @@
+ALTER TABLE "Agent" ADD COLUMN "fileUploadEnabled" boolean DEFAULT false NOT NULL;
