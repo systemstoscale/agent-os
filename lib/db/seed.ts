@@ -83,9 +83,13 @@ async function seed() {
   const connection = postgres(process.env.POSTGRES_URL, { max: 1 });
   const db = drizzle(connection);
 
-  // 1. Create default admin user (if not exists).
-  // Override via ADMIN_EMAIL / ADMIN_PASSWORD env vars. Change these after deploy.
-  const email = process.env.ADMIN_EMAIL || "name@domain.com";
+  // 1. Upsert the admin user.
+  // ADMIN_EMAIL / ADMIN_PASSWORD are the source of truth (there is no in-app
+  // password change UI), so the env is the canonical credential store. To
+  // ROTATE the admin password: change ADMIN_PASSWORD (and ADMIN_EMAIL) in your
+  // environment and redeploy. The password is never logged.
+  const PLACEHOLDER_EMAIL = "name@domain.com";
+  const email = process.env.ADMIN_EMAIL || PLACEHOLDER_EMAIL;
   const password = process.env.ADMIN_PASSWORD || "@Password0";
 
   const existingUsers = await db
@@ -94,16 +98,24 @@ async function seed() {
     .where(eq(user.email, email));
 
   if (existingUsers.length === 0) {
-    console.log("Creating default admin user...");
+    console.log(`Creating admin user: ${email}`);
     await db.insert(user).values({
       email,
       password: hashPassword(password),
       role: "admin",
     });
-    console.log(`  Email: ${email}`);
-    console.log(`  Password: ${password}`);
   } else {
-    console.log("⏭️  Default admin user already exists, skipping");
+    console.log(`Syncing admin password from env: ${email}`);
+    await db
+      .update(user)
+      .set({ password: hashPassword(password), role: "admin" })
+      .where(eq(user.email, email));
+  }
+
+  // Security: if a real ADMIN_EMAIL was configured, delete the public
+  // placeholder admin so the well-known default credentials can never log in.
+  if (email !== PLACEHOLDER_EMAIL) {
+    await db.delete(user).where(eq(user.email, PLACEHOLDER_EMAIL));
   }
 
   // 2. Create default agent (if none exist)
