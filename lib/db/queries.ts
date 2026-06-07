@@ -11,6 +11,7 @@ import {
   inArray,
   lt,
   max,
+  sql,
   type SQL,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -1721,5 +1722,37 @@ export async function cloneChatWithMessages({
       throw error;
     }
     throw new ChatSDKError("bad_request:database", "Failed to clone chat");
+  }
+}
+
+// creditsLimit is repurposed as the additive credit balance (1 credit = 1 message).
+export async function addCredits({
+  id,
+  amount,
+}: {
+  id: string;
+  amount: number;
+}): Promise<User | null> {
+  try {
+    const [updatedUser] = await db
+      .update(user)
+      .set({ creditsLimit: sql`${user.creditsLimit} + ${amount}` })
+      .where(eq(user.id, id))
+      .returning();
+    return updatedUser || null;
+  } catch (_error) {
+    throw new ChatSDKError("bad_request:database", "Failed to add credits");
+  }
+}
+
+export async function deductCredit({ id }: { id: string }): Promise<void> {
+  try {
+    // Floor at 0: only decrement when balance is still positive (atomic guard).
+    await db
+      .update(user)
+      .set({ creditsLimit: sql`${user.creditsLimit} - 1` })
+      .where(and(eq(user.id, id), gt(user.creditsLimit, 0)));
+  } catch (_error) {
+    throw new ChatSDKError("bad_request:database", "Failed to deduct credit");
   }
 }

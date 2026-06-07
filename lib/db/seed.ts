@@ -1,10 +1,13 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { config } from "dotenv";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { genSaltSync, hashSync } from "bcrypt-ts";
 import Stripe from "stripe";
-import { user, agent, siteConfig } from "./schema";
+import { CREDIT_PACKS } from "../payments/packs";
+import { agent, agentFile, siteConfig, user } from "./schema";
 
 config({ path: ".env.local" });
 
@@ -14,64 +17,37 @@ function hashPassword(password: string) {
 }
 
 async function createStripeProducts(stripe: Stripe) {
+  console.log("Creating Stripe credit packs (idempotent)...");
+  // Idempotent per pack id. Safe on a Stripe account shared with other
+  // products: we only create agent-os packs that don't already exist and
+  // never touch unrelated products.
   const existing = await stripe.products.list({ active: true, limit: 100 });
-  if (existing.data.length > 0) {
-    console.log("⏭️  Stripe products already exist, skipping");
-    return;
+
+  for (const pack of CREDIT_PACKS) {
+    const already = existing.data.find((p) => p.metadata?.packId === pack.id);
+    if (already) {
+      console.log(`  ⏭️  ${pack.name} already exists, skipping`);
+      continue;
+    }
+
+    const product = await stripe.products.create({
+      name: pack.name,
+      description: `${pack.credits} message credits (one-time)`,
+      metadata: { packId: pack.id, credits: String(pack.credits) },
+    });
+
+    // One-time price (no recurring); metadata.credits is the grant amount the
+    // webhook reads on checkout.session.completed.
+    const price = await stripe.prices.create({
+      product: product.id,
+      unit_amount: pack.amountCents,
+      currency: "usd",
+      metadata: { packId: pack.id, credits: String(pack.credits) },
+    });
+
+    await stripe.products.update(product.id, { default_price: price.id });
+    console.log(`  Created ${pack.name}: ${product.id}`);
   }
-
-  console.log("Creating Stripe products and prices...");
-
-  const baseProduct = await stripe.products.create({
-    name: "Base",
-    description: "For individuals getting started",
-    metadata: {
-      credits_per_month: "100",
-      features: "Access to all agents,Email support",
-    },
-  });
-
-  const basePrice = await stripe.prices.create({
-    product: baseProduct.id,
-    unit_amount: 800,
-    currency: "usd",
-    recurring: {
-      interval: "month",
-      trial_period_days: 7,
-    },
-  });
-
-  await stripe.products.update(baseProduct.id, {
-    default_price: basePrice.id,
-  });
-
-  console.log(`  Created Base product: ${baseProduct.id}`);
-
-  const plusProduct = await stripe.products.create({
-    name: "Plus",
-    description: "For power users who need more",
-    metadata: {
-      credits_per_month: "500",
-      features:
-        "Access to all agents,Priority support,Early access to features",
-    },
-  });
-
-  const plusPrice = await stripe.prices.create({
-    product: plusProduct.id,
-    unit_amount: 1200,
-    currency: "usd",
-    recurring: {
-      interval: "month",
-      trial_period_days: 7,
-    },
-  });
-
-  await stripe.products.update(plusProduct.id, {
-    default_price: plusPrice.id,
-  });
-
-  console.log(`  Created Plus product: ${plusProduct.id}`);
 }
 
 async function seed() {
@@ -118,10 +94,71 @@ async function seed() {
     await db.delete(user).where(eq(user.email, PLACEHOLDER_EMAIL));
   }
 
-  // 2. Create default agent (if none exist)
+  // 2. Seed agents (only when none exist). If lib/db/seed-agents.json is
+  // present, seed those agents and their knowledge files; otherwise create a
+  // single generic default agent. The JSON file is private (gitignored) and is
+  // only added to private deployments, so public clones get the generic agent.
+  const agentsPath = join(process.cwd(), "lib", "db", "seed-agents.json");
   const existingAgents = await db.select().from(agent);
 
-  if (existingAgents.length === 0) {
+  if (existsSync(agentsPath)) {
+    // Private deployment: upsert the real agents by name (idempotent), seed
+    // their knowledge files, and remove the generic placeholder if present.
+    const defs = JSON.parse(readFileSync(agentsPath, "utf8")) as Array<{
+      name: string;
+      description?: string;
+      systemPrompt: string;
+      suggestions?: string[];
+      isPublished?: boolean;
+      isDefault?: boolean;
+      files?: Array<{ name: string; content: string }>;
+    }>;
+
+    let order = 0;
+    for (const def of defs) {
+      const [already] = await db
+        .select()
+        .from(agent)
+        .where(eq(agent.name, def.name))
+        .limit(1);
+      if (already) {
+        console.log(`⏭️  Agent "${def.name}" exists, skipping`);
+        order++;
+        continue;
+      }
+      const [created] = await db
+        .insert(agent)
+        .values({
+          name: def.name,
+          description: def.description ?? null,
+          systemPrompt: def.systemPrompt,
+          suggestions: def.suggestions ?? [],
+          isPublished: def.isPublished ?? true,
+          isDefault: def.isDefault ?? false,
+          order: order++,
+          documentToolsEnabled: false,
+          fileUploadEnabled: false,
+        })
+        .returning();
+
+      for (const f of def.files ?? []) {
+        await db
+          .insert(agentFile)
+          .values({ agentId: created.id, name: f.name, content: f.content });
+      }
+      console.log(
+        `  Created agent: ${def.name} (${(def.files ?? []).length} files)`
+      );
+    }
+
+    // Best-effort: drop the generic placeholder so it does not linger next to
+    // the real agents. Ignore if it has dependent chats (FK).
+    try {
+      await db.delete(agent).where(eq(agent.name, "General Assistant"));
+    } catch (_e) {
+      console.log("  (kept General Assistant; it has dependent rows)");
+    }
+  } else if (existingAgents.length === 0) {
     console.log("Creating default agent...");
     await db.insert(agent).values({
       name: "General Assistant",

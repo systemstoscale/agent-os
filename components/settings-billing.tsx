@@ -1,6 +1,5 @@
 import { auth } from "@/app/(auth)/auth";
 import { getUserById } from "@/lib/db/queries";
-import { customerPortalAction } from "@/lib/payments/actions";
 import { getUserCredits } from "@/lib/payments/credits";
 
 export async function SettingsBilling() {
@@ -16,81 +15,24 @@ export async function SettingsBilling() {
 
   const credits = await getUserCredits(session.user.id);
 
-  const periodEndDate = new Date(credits.periodStart);
-  periodEndDate.setMonth(periodEndDate.getMonth() + 1);
-
-  const creditsPercentage = Math.min(100, (credits.used / credits.limit) * 100);
-
   return (
     <div className="space-y-6">
       <div className="rounded-lg border p-6">
-        <h3 className="font-medium mb-4">Current Plan</h3>
+        <h3 className="font-medium mb-4">Credit Balance</h3>
 
         <div className="mb-4">
-          <p className="text-2xl font-bold">{user.planName || "Free Plan"}</p>
-          {user.subscriptionStatus === "canceling" ? (
-            <p className="text-sm text-amber-600">
-              Cancels on {periodEndDate.toLocaleDateString()}
-            </p>
-          ) : user.subscriptionStatus ? (
-            <p className="text-sm text-muted-foreground capitalize">
-              Status: {user.subscriptionStatus}
-            </p>
-          ) : null}
+          <p className="text-3xl font-bold">{credits.balance}</p>
+          <p className="text-sm text-muted-foreground">
+            credits remaining. 1 credit = 1 message.
+          </p>
         </div>
 
-        <div className="flex gap-3">
-          <a
-            className="rounded-md bg-secondary px-4 py-2 text-sm font-medium hover:bg-secondary/80"
-            href="/pricing"
-          >
-            Manage Subscription
-          </a>
-          {user.stripeSubscriptionId && (
-            <>
-              <form action={customerPortalAction}>
-                <button
-                  className="rounded-md bg-secondary px-4 py-2 text-sm font-medium hover:bg-secondary/80"
-                  type="submit"
-                >
-                  Billing History
-                </button>
-              </form>
-              <form action={customerPortalAction}>
-                <button
-                  className="rounded-md bg-secondary px-4 py-2 text-sm font-medium hover:bg-secondary/80"
-                  type="submit"
-                >
-                  Cancel Subscription
-                </button>
-              </form>
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className="rounded-lg border p-6">
-        <h3 className="font-medium mb-4">Credit Usage</h3>
-
-        <div className="mb-2 flex justify-between text-sm">
-          <span>
-            {credits.used} / {credits.limit} credits used
-          </span>
-          <span className="text-muted-foreground">
-            {credits.remaining} remaining
-          </span>
-        </div>
-
-        <div className="h-2 bg-secondary rounded-full overflow-hidden">
-          <div
-            className="h-full bg-primary transition-all"
-            style={{ width: `${creditsPercentage}%` }}
-          />
-        </div>
-
-        <p className="text-sm text-muted-foreground mt-3">
-          Credits reset on {periodEndDate.toLocaleDateString()}
-        </p>
+        <a
+          className="inline-block rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          href="/pricing"
+        >
+          Top Up Credits
+        </a>
       </div>
     </div>
   );

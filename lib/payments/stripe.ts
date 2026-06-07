@@ -1,7 +1,6 @@
 import "server-only";
 
 import Stripe from "stripe";
-import { updateUserSubscription } from "@/lib/db/queries";
 
 // Stripe is OPTIONAL. The key may be absent at build time and on free-tier
 // deploys, so we fall back to a harmless placeholder string at construction
@@ -15,60 +14,43 @@ export const stripe = new Stripe(
   process.env.STRIPE_SECRET_KEY || "sk_placeholder_stripe_not_configured"
 );
 
-export type StripeProduct = {
-  id: string;
-  name: string;
-  description: string | null;
-  creditsPerMonth: number;
-  features: string[];
-  defaultPriceId: string | null;
-};
-
-export type StripePrice = {
-  id: string;
-  productId: string;
-  unitAmount: number | null;
+export type CreditPackPrice = {
+  packId: string;
+  priceId: string;
+  productName: string;
+  credits: number;
+  amountCents: number;
   currency: string;
-  interval: string | null;
-  trialPeriodDays: number | null;
 };
 
-export async function getStripeProducts(): Promise<StripeProduct[]> {
-  const products = await stripe.products.list({
-    active: true,
-    expand: ["data.default_price"],
-  });
-
-  return products.data.map((p) => ({
-    id: p.id,
-    name: p.name,
-    description: p.description,
-    creditsPerMonth: Number.parseInt(p.metadata.credits_per_month || "0", 10),
-    features: (p.metadata.features || "").split(",").filter(Boolean),
-    defaultPriceId:
-      typeof p.default_price === "string"
-        ? p.default_price
-        : p.default_price?.id || null,
-  }));
-}
-
-export async function getStripePrices(): Promise<StripePrice[]> {
+// Lists active one-time prices that carry a credits metadata value, mapping
+// each back to its pack id. The webhook and pricing page rely on the same
+// metadata.credits stamped by scripts/seed-stripe.ts.
+export async function getCreditPackPrices(): Promise<CreditPackPrice[]> {
   const prices = await stripe.prices.list({
     active: true,
     expand: ["data.product"],
   });
 
-  return prices.data.map((p) => ({
-    id: p.id,
-    productId: typeof p.product === "string" ? p.product : p.product.id,
-    unitAmount: p.unit_amount,
-    currency: p.currency,
-    interval: p.recurring?.interval || null,
-    trialPeriodDays: p.recurring?.trial_period_days || null,
-  }));
+  return prices.data
+    .filter((p) => p.type === "one_time" && p.metadata.credits)
+    .map((p) => {
+      const product = typeof p.product === "string" ? null : p.product;
+      const productName =
+        product && !product.deleted ? product.name : "Credits";
+      return {
+        packId: p.metadata.packId || "",
+        priceId: p.id,
+        productName,
+        credits: Number.parseInt(p.metadata.credits || "0", 10),
+        amountCents: p.unit_amount || 0,
+        currency: p.currency,
+      };
+    })
+    .sort((a, b) => a.amountCents - b.amountCents);
 }
 
-export async function createCheckoutSession({
+export async function createTopupCheckoutSession({
   userId,
   userEmail,
   priceId,
@@ -77,8 +59,10 @@ export async function createCheckoutSession({
   userEmail: string;
   priceId: string;
 }): Promise<string> {
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+
   const session = await stripe.checkout.sessions.create({
-    mode: "subscription",
+    mode: "payment",
     payment_method_types: ["card"],
     line_items: [
       {
@@ -86,15 +70,10 @@ export async function createCheckoutSession({
         quantity: 1,
       },
     ],
-    success_url: `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/api/stripe/checkout?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/pricing`,
+    success_url: `${baseUrl}/settings/billing?success=1`,
+    cancel_url: `${baseUrl}/settings/billing?canceled=1`,
     customer_email: userEmail,
     client_reference_id: userId,
-    subscription_data: {
-      metadata: {
-        userId,
-      },
-    },
     metadata: {
       userId,
     },
@@ -105,92 +84,4 @@ export async function createCheckoutSession({
   }
 
   return session.url;
-}
-
-export async function createCustomerPortalSession(
-  stripeCustomerId: string
-): Promise<string> {
-  const session = await stripe.billingPortal.sessions.create({
-    customer: stripeCustomerId,
-    return_url: `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/settings/billing`,
-  });
-
-  return session.url;
-}
-
-export async function handleSubscriptionChange(
-  subscription: Stripe.Subscription
-): Promise<void> {
-  const userId = subscription.metadata.userId;
-  if (!userId) {
-    console.error("No userId in subscription metadata", subscription.id);
-    return;
-  }
-
-  const productId =
-    typeof subscription.items.data[0]?.price.product === "string"
-      ? subscription.items.data[0].price.product
-      : subscription.items.data[0]?.price.product.id;
-
-  let creditsLimit = 10;
-  let planName = "Free";
-
-  if (productId) {
-    const product = await stripe.products.retrieve(productId);
-    creditsLimit = Number.parseInt(
-      product.metadata.credits_per_month || "10",
-      10
-    );
-    planName = product.name;
-  }
-
-  // Determine effective status - Stripe keeps status "active" even when canceling
-  const effectiveStatus = subscription.cancel_at_period_end
-    ? "canceling"
-    : subscription.status;
-
-  // Safely create billing period start date (moved to items in newer Stripe API)
-  const currentPeriodStart = subscription.items.data[0]?.current_period_start;
-  const billingPeriodStart = currentPeriodStart
-    ? new Date(currentPeriodStart * 1000)
-    : new Date();
-
-  await updateUserSubscription({
-    id: userId,
-    stripeCustomerId:
-      typeof subscription.customer === "string"
-        ? subscription.customer
-        : subscription.customer.id,
-    stripeSubscriptionId: subscription.id,
-    stripeProductId: productId || null,
-    planName,
-    subscriptionStatus: effectiveStatus,
-    creditsLimit,
-    billingPeriodStart,
-  });
-}
-
-export async function handleSubscriptionDeleted(
-  subscription: Stripe.Subscription
-): Promise<void> {
-  const userId = subscription.metadata.userId;
-  if (!userId) {
-    console.error("No userId in subscription metadata", subscription.id);
-    return;
-  }
-
-  const freeCredits = Number.parseInt(
-    process.env.FREE_CREDITS_PER_MONTH || "10",
-    10
-  );
-
-  await updateUserSubscription({
-    id: userId,
-    stripeSubscriptionId: null,
-    stripeProductId: null,
-    planName: null,
-    subscriptionStatus: "canceled",
-    creditsLimit: freeCredits,
-    billingPeriodStart: null,
-  });
 }

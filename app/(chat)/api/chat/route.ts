@@ -18,6 +18,7 @@ import { updateDocument } from "@/lib/ai/tools/update-document";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
+  deductCredit,
   deleteChatById,
   getAgentById,
   getAgentFilesByAgentId,
@@ -32,7 +33,7 @@ import {
 } from "@/lib/db/queries";
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
-import { canSendMessage, getUserCredits } from "@/lib/payments/credits";
+import { canSendMessage } from "@/lib/payments/credits";
 import type { ChatMessage } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
@@ -81,10 +82,9 @@ export async function POST(request: Request) {
     if (!isUnlimited(userRole)) {
       const hasCredits = await canSendMessage(session.user.id);
       if (!hasCredits) {
-        const credits = await getUserCredits(session.user.id);
         return new ChatSDKError(
           "rate_limit:chat",
-          `You have used all ${credits.limit} credits for this billing period. Upgrade your plan or wait until your credits reset.`
+          "You are out of credits. Top up to keep chatting."
         ).toResponse();
       }
     }
@@ -163,6 +163,12 @@ export async function POST(request: Request) {
           },
         ],
       });
+
+      // Charge 1 credit per accepted user message (deductCredit floors at 0).
+      // Admins (isUnlimited) are not charged.
+      if (!isUnlimited(userRole)) {
+        await deductCredit({ id: session.user.id });
+      }
     }
 
     const isReasoningModel =

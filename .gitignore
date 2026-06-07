@@ -47,3 +47,6 @@ test.env
 # Local agent tooling audit logs / stray outputs
 outputs/
 **/agent-audit.jsonl
+
+# Private agent IP — only added to private deployments, never the public repo
+lib/db/seed-agents.json
